@@ -1,0 +1,146 @@
+#include <cstdio>
+#include <cstdlib>
+#include <time.h>
+#define CUDA_SAFE_CALL(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t code, char *file, int line, bool abort=true)
+{
+	if (code != cudaSuccess) 
+	{
+		fprintf(stderr,"CUDA_SAFE_CALL: %s %s %d\n", cudaGetErrorString(code), file, line);
+		if (abort) exit(code);
+	}
+}
+
+#define THREADS_PER_BLOCK 1
+#define NUM_BLOCKS        5
+#define ARR_LEN 5 //matrix size
+
+#define ITERS 1
+#define PRINT_TIME 1
+
+//typedef float float;
+
+/************************************/
+/* SOR */
+__global__ void MMM_global( int* A, int a, int b )
+{
+  long int i = blockDim.x * blockIdx.x + threadIdx.x;
+  i += blockDim.y * blockIdx.y + threadIdx.y;
+  int len = ARR_LEN;
+  
+  if( i < len )
+	{
+		*(A+ a*len + i ) = (  *(A+ a*len + i)  )  |  (  *(A+ b*len + i )  );
+		//then reflect
+	  *(A + i*len + a ) = *(A + a*len + i );
+	}
+  
+}
+
+
+//----------------------------------------------------------------------------
+int main( int argc, char **argv )
+{
+	srand( time( NULL ));
+  size_t mem_size = sizeof( int ) * ARR_LEN * ARR_LEN;
+
+  //Randomizing matrix function
+  void initRandArray( int* array, int length );
+  void PrintMat( int*, int );
+  
+  //GPU dimensions
+  dim3 dimGrid( NUM_BLOCKS, NUM_BLOCKS );
+  dim3 dimBlock( THREADS_PER_BLOCK, THREADS_PER_BLOCK, 1 );
+  
+	// GPU Timing variables
+	cudaEvent_t start, stop;
+	float elapsed_gpu;
+	
+	//host array
+	int* h_a;
+	int* h_result;
+	//allocate
+	h_a      = (int*) malloc( mem_size );
+	h_result = (int*) malloc( mem_size );
+	
+	//gpu arrays
+	int* d_a;
+  CUDA_SAFE_CALL(cudaMalloc((void **)&d_a, mem_size ));
+	CUDA_SAFE_CALL(cudaSetDevice(0)); //set to correct device
+//------------
+//MMM test
+//------------
+  int i;
+  int a = 0;
+  int b = 1;
+  printf("OR test\n----------\n");
+  for( i = 0; i < ITERS; i++ )
+  {
+    
+    //initialize host array
+    initRandArray( h_a, (int)ARR_LEN );
+    printf("Initial Array\n");
+    PrintMat( h_a, ARR_LEN );
+	  #if PRINT_TIME
+	  // Create the cuda events
+	    cudaEventCreate(&start);
+	    cudaEventCreate(&stop);
+	  // Record event on the default stream
+	    cudaEventRecord(start, 0);
+    #endif
+    
+    // Transfer the arrays to the GPU memory
+	  CUDA_SAFE_CALL(cudaMemcpy(d_a, h_a, mem_size, cudaMemcpyHostToDevice));
+	   
+	  // Launch the kernel
+	  MMM_global<<< dimGrid, dimBlock >>>(  d_a, a, b );
+	
+	  // Transfer the results back to the host
+	  CUDA_SAFE_CALL(cudaMemcpy(h_result, d_a, mem_size, cudaMemcpyDeviceToHost));
+	  
+	  printf("GPU result\n");
+	  PrintMat( h_result, ARR_LEN );
+    
+    #if PRINT_TIME
+	  // Stop and destroy the timer
+	    cudaEventRecord(stop,0);
+	    cudaEventSynchronize(stop);
+	    cudaEventElapsedTime(&elapsed_gpu, start, stop);
+	    printf("time: %f (msec)\n", elapsed_gpu);
+	    cudaEventDestroy(start);
+	    cudaEventDestroy(stop);
+    #endif
+  }
+  
+	return 0;
+}
+
+//----------------------------------------------------------------------------
+//intialize an array to random values	
+void initRandArray ( int *arr, int len) {
+	int i;
+	int j;
+
+	for (i = 0; i < len; i++)
+	{
+	  for( j = 0; j < len; j++ )
+	  {
+		  arr[i*len + j] = rand()&1;
+		}
+	}
+}
+
+void PrintMat( int* A, int V )
+{
+	int i,j;
+	for( i = 0; i < V; i++ )
+	{
+		for( j = 0; j < V; j++ )
+		{
+			printf("%i ", *( A + i*V + j ) );
+		}
+		printf( "\n" );
+	}
+	return;
+}
+

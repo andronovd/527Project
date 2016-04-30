@@ -1,0 +1,295 @@
+/* 
+this program finds the chromatic number of 
+an undirected graph given an adjacency matrix
+*/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <time.h>
+#include <math.h>
+
+#define ITERS 10
+#define DELTA 0
+#define BASE  100
+
+#define CPG 3.4
+#define GIG 1000000000
+
+#define THREADS_PER_BLOCK 1
+#define NUM_BLOCKS        5
+#define ARR_LEN 5 //matrix size
+
+#define PRINT_TIME 1
+#define OPTIONS 2
+
+#define CUDA_SAFE_CALL(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t code, char *file, int line, bool abort=true)
+{
+	if (code != cudaSuccess) 
+	{
+		fprintf(stderr,"CUDA_SAFE_CALL: %s %s %d\n", cudaGetErrorString(code), file, line);
+		if (abort) exit(code);
+	}
+}
+
+
+
+///////////////////////////////////////////////////////////////////////////////
+//GPU Combination function
+__global__ void GPU_Combine( int* A, int V, int a, int b )
+{
+  long int i = blockDim.x * blockIdx.x + threadIdx.x;
+  i += blockDim.y * blockIdx.y + threadIdx.y;
+ 
+  
+  if( i < V )
+	{
+		*(A+ a*V + i ) = (  *(A+ a*V + i)  )  |  (  *(A+ b*V + i )  );
+		//then reflect
+	  *(A + i*V + a ) = *(A + a*V + i );
+	}
+  
+}
+
+
+
+///////////////////////////////////////////////////////////////////////////////
+//functions def
+int Gamma( char*, int*, int );
+int GPUGamma( char*, int*, int, int, int*, dim3, dim3 );
+int clock_gettime(clockid_t clk_id, struct timespec *tp);
+void RandUGph( int*, int );
+void Combine( int*, int, int , int );
+void PrintMat( int*, int );
+struct timespec diff( struct timespec,  struct timespec );
+int clock_gettime(clockid_t clk_id, struct timespec *tp);
+///////////////////////////////////////////////////////////////////////////////
+//main
+int main( int argc, char** argv )
+{
+	srand( time( NULL ) );
+	int i,g, opt = 0;
+	int cn[ITERS];
+	int V = BASE + DELTA;
+	int* mat;
+	char* index;
+	struct timespec times[OPTIONS][ITERS];
+	struct timespec time1, time2;
+	
+//gpu preparation
+	size_t mem_size = sizeof( int ) * V * V;
+  
+	//gpu arrays
+	int* d_a;
+  CUDA_SAFE_CALL(cudaMalloc((void **)&d_a, mem_size ));
+	CUDA_SAFE_CALL(cudaSetDevice(0)); //set to correct device
+	
+/*
+	Serial Version
+*/
+	for( i = 0; i < ITERS; i++ )
+	{
+	//intialize arrays
+		index = (char*) calloc( V, sizeof(char) );
+		mat = (int* ) calloc( V*V, sizeof( int ) );
+	  RandUGph( mat, V );	
+	//perform timing
+		clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time1);
+		cn[i] = Gamma ( index, mat, V );
+		clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time2);
+	//record
+		free( index );
+	  times[opt][i] = diff( time1, time2 );
+	  V +=DELTA;
+	}
+
+/*
+	GPU Version
+*/
+	opt++;
+	for( i = 0; i < ITERS; i++ )
+	{
+		dim3 dimGrid( V*V );
+		dim3 dimBlock( 1, 1, 1 );	
+		int* d_a;
+		CUDA_SAFE_CALL(cudaMalloc((void **)&d_a, mem_size ));
+		CUDA_SAFE_CALL(cudaSetDevice(0)); //set to correct device
+	 
+	//intialize arrays
+		mem_size = sizeof( int ) * V * V;
+		index = (char*) calloc( V, sizeof(char) );
+		mat = (int* ) calloc( V*V, sizeof( int ) );
+	  RandUGph( mat, V );
+	//perform timing
+		clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time1);
+		cn[i] = GPUGamma ( index, mat, V , mem_size, d_a, dimGrid, dimBlock);
+		clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time2);
+	//record
+		free( index );
+	  times[opt][i] = diff( time1, time2 );
+	  V +=DELTA;
+	}
+
+//print output
+	int j;
+	V = BASE + DELTA;
+	printf("TIME(nsec)\nSerial|Threaded\n");
+	for( j = 0; j < ITERS; j++ )
+	{
+		for( i = 0; i < OPTIONS; i++ )
+		{
+			printf("%6f ", (float)((double)(CPG)*(double)
+			 (GIG * times[i][j].tv_sec + times[i][j].tv_nsec))/1000000000);
+			V +=DELTA;
+		}	
+		printf("\n");
+	}		
+}
+//end of main
+///////////////////////////////////////////////////////////////////////////////
+//function intialization
+void RandUGph( int* mat, int V )
+{
+	int i,j,r;
+
+	for( i = 0; i < V; i++ )
+	{
+		for( j = 0; j < V; j++ )
+		{
+			r = 0;
+			if( i < j )
+			{
+				r = rand()&1;
+				*( mat + i*V + j ) = r;
+			}
+			else if ( i == j )
+			{
+				//do nothing
+			}
+			else if ( i > j )
+			{
+				r = *( mat + j*V + i);
+				*( mat +i*V + j ) = *( mat + j*V + i );
+			}
+		}
+	}
+	return;
+}
+///////////////////////////////////////////////////////////////////////////////
+int Gamma ( char* Index, int* A, int V )
+{	
+	int i, j, a, ncombine = V; 
+	for( i = 0; i < V; i++ )
+	{
+		if( Index[i] )
+		{}
+		else
+		{
+			for( j = 0; j < V; j++ )
+			{
+				if( Index[j] )
+				{}
+				else if( !*(A + i*V + j ) & i != j)
+				{
+					//found a disconnect
+					ncombine--;
+					Index[j] = 1;
+					//cobmine
+					Combine( A, V, i, j );
+					i = 0;
+					j = 0;
+					//we found two non-adjacent vectors 	
+					break;	
+				}
+			}
+		}
+	}
+	return ncombine;		
+}
+///////////////////////////////////////////////////////////////////////////////
+void Combine( int* A, int V, int i , int j )
+{
+	//or row i with row j and store in row j & reflect acroos the diagonal
+	int x, a, b;
+	for( x = 0; x < V; x++ )
+	{
+		a = *( A + j*V + x );
+		b = *( A + i*V + x );
+		b |= a;
+		*(A + i*V + x ) = b;
+	}
+	
+	//reflect
+	for( x = 0; x < V; x++ )
+	{
+		*(A + x*V + i ) = *( A + i*V + x );
+	}
+	return;
+}
+
+int GPUGamma ( char* Index, int* A, int V, int mem_size, int* d_a, dim3 dimGrid, dim3 dimBlock )
+{
+	
+	int i, j, a, ncombine = V;
+	for( i = 0; i < V; i++ )
+	{
+		if( Index[i] )
+		{}
+		else
+		{
+			for( j = 0; j < V; j++ )
+			{
+				if( Index[j] )
+				{}
+				else if( !*(A + i*V + j ) & i != j)
+				{
+					//found a disconnect
+					ncombine--;
+					Index[j] = 1;
+					//cobmine
+					CUDA_SAFE_CALL(cudaMemcpy(d_a, A, mem_size, cudaMemcpyHostToDevice));
+	   
+					// Launch the kernel
+					GPU_Combine<<< dimGrid, dimBlock >>>(  d_a, V ,i, j );
+	
+					// Transfer the results back to the host
+					CUDA_SAFE_CALL(cudaMemcpy(A, d_a, mem_size, cudaMemcpyDeviceToHost));
+					i = 0;
+					j = 0;
+					//we found two non-adjacent vectors 	
+					break;	
+				}
+			}
+		}
+	}
+	return ncombine;		
+}
+///////////////////////////////////////////////////////////////////////////////
+void PrintMat( int* A, int V )
+{
+	int i,j;
+	for( i = 0; i < V; i++ )
+	{
+		for( j = 0; j < V; j++ )
+		{
+			printf("%i ", *( A + i*V + j ) );
+		}
+		printf( "\n" );
+	}
+	return;
+}
+///////////////////////////////////////////////////////////////////////////////
+//timing mechanism
+struct timespec diff(struct timespec start, struct timespec end)
+{
+  struct timespec temp;
+  if ((end.tv_nsec-start.tv_nsec)<0) {
+    temp.tv_sec = end.tv_sec-start.tv_sec-1;
+    temp.tv_nsec = 1000000000+end.tv_nsec-start.tv_nsec;
+  } else {
+    temp.tv_sec = end.tv_sec-start.tv_sec;
+    temp.tv_nsec = end.tv_nsec-start.tv_nsec;
+  }
+  return temp;
+}
